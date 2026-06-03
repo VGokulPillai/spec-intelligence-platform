@@ -1,0 +1,35 @@
+command:
+  - "uvicorn"
+  - "main:app"
+  - "--host"
+  - "0.0.0.0"
+  - "--port"
+  - "8000"
+env:
+  - name: DATABRICKS_HOST
+    value: https://fevm-serverless-stable-0esuib.cloud.databricks.com
+  - name: DATABRICKS_WAREHOUSE_ID
+    value: "015f965b7e3560dc"
+  - name: SPEC_CATALOG
+    value: serverless_stable_0esuib_catalog
+  - name: SPEC_SCHEMA
+    value: spec_docs
+  - name: LLM_ENDPOINT
+    value: databricks-meta-llama-3-3-70b-instruct
+  - name: EMBEDDING_ENDPOINT
+    value: databricks-bge-large-en
+  - name: ENABLE_VECTOR_SEARCH
+    value: "true"
+resources:
+  - name: sql-warehouse
+    sql_warehouse:
+      id: "015f965b7e3560dc"
+      permission: CAN_USE
+  - name: model-serving
+    serving_endpoint:
+      name: "databricks-meta-llama-3-3-70b-instruct"
+      permission: CAN_QUERY
+  - name: embedding-serving
+    serving_endpoint:
+      name: "databricks-bge-large-en"
+      permission: CAN_QUERY
