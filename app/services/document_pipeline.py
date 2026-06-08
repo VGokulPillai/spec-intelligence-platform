@@ -47,22 +47,24 @@ def _ensure_tables():
         _tables_initialized = True
 
 
-def process_uploaded_document(file_bytes: bytes, original_filename: str) -> dict[str, Any]:
+def process_uploaded_document(file_bytes: bytes, original_filename: str, document_id: str = None) -> dict[str, Any]:
     """Full pipeline for a new document upload.
 
+    If document_id is provided, assumes file is already uploaded and record exists.
     Returns document metadata dict on success, error dict on failure.
     """
     _ensure_tables()
-    document_id = generate_id()
     now = utc_now()
 
-    # 1. Upload to UC Volume
-    uc_path = upload_file_to_volume(file_bytes, original_filename, document_id)
-    if not uc_path:
-        return {"error": "Failed to upload file to Unity Catalog Volume"}
-
-    # 2. Insert pending document record
-    _insert_document_pending(document_id, original_filename, uc_path, len(file_bytes), now)
+    if document_id is None:
+        # Synchronous mode: handle upload + record creation
+        document_id = generate_id()
+        uc_path = upload_file_to_volume(file_bytes, original_filename, document_id)
+        if not uc_path:
+            return {"error": "Failed to upload file to Unity Catalog Volume"}
+        _insert_document_pending(document_id, original_filename, uc_path, len(file_bytes), now)
+    else:
+        uc_path = None
 
     # 3. Parse PDF
     parsed = parse_pdf(file_bytes)

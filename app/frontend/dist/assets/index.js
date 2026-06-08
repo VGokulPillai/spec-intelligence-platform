@@ -151,7 +151,7 @@ function UploadPage({ onUploadComplete }) {
     setUploadResult(null);
     try {
       const result = await uploadFile("/api/documents/upload", file);
-      setUploadResult(result);
+      setUploadResult({...result, message: result.message || "Document uploaded and processing. Check Documents page for status."});
       if (onUploadComplete) onUploadComplete();
     } catch (err) {
       setError(err.message);
