@@ -1,20 +1,25 @@
-"""Document management routes — upload, list, detail, sections."""
+"""Document management routes — upload, list, detail, sections, progress."""
 from __future__ import annotations
 
 import logging
 import threading
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
-from pydantic import BaseModel
 
+from app.config import TABLE_DOCUMENTS
 from app.services.document_pipeline import (
     get_all_documents,
     get_document,
     get_document_sections,
     process_uploaded_document,
 )
-from app.services.uc_repository import generate_id, upload_file_to_volume, utc_now, execute_sql_no_result
-from app.config import TABLE_DOCUMENTS
+from app.services.progress_tracker import get_progress, init_progress, complete_step
+from app.services.uc_repository import (
+    execute_sql_no_result,
+    generate_id,
+    upload_file_to_volume,
+    utc_now,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/documents", tags=["documents"])
@@ -22,14 +27,12 @@ router = APIRouter(prefix="/api/documents", tags=["documents"])
 
 @router.get("")
 async def list_documents():
-    """List all uploaded documents."""
     docs = get_all_documents()
     return {"documents": docs, "count": len(docs)}
 
 
 @router.get("/{document_id}")
 async def get_document_detail(document_id: str):
-    """Get full detail for a single document."""
     doc = get_document(document_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -38,9 +41,20 @@ async def get_document_detail(document_id: str):
 
 @router.get("/{document_id}/sections")
 async def get_sections(document_id: str):
-    """Get parsed sections for a document."""
     sections = get_document_sections(document_id)
     return {"sections": sections, "count": len(sections)}
+
+
+@router.get("/{document_id}/progress")
+async def get_document_progress(document_id: str):
+    """Get real-time pipeline progress for a document being processed."""
+    progress = get_progress(document_id)
+    if not progress:
+        doc = get_document(document_id)
+        if doc and doc.get("parsing_status") == "completed":
+            return {"document_id": document_id, "status": "completed", "percent": 100, "steps": []}
+        raise HTTPException(status_code=404, detail="No progress data found")
+    return progress
 
 
 def _process_in_background(file_bytes: bytes, filename: str, document_id: str):
@@ -59,8 +73,7 @@ def _process_in_background(file_bytes: bytes, filename: str, document_id: str):
 async def upload_document(file: UploadFile = File(...)):
     """Upload a PDF and start async processing.
 
-    Returns immediately with document_id and status='processing'.
-    The client should poll GET /api/documents/{id} until parsing_status='completed'.
+    Returns immediately with document_id. Frontend polls /progress for live updates.
     """
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are accepted")
@@ -72,16 +85,21 @@ async def upload_document(file: UploadFile = File(...)):
     if len(file_bytes) > 100 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File exceeds 100MB limit")
 
-    logger.info("Upload received: %s (%d bytes) — starting async processing", file.filename, len(file_bytes))
+    logger.info("Upload received: %s (%d bytes)", file.filename, len(file_bytes))
 
     document_id = generate_id()
+    init_progress(document_id)
 
-    # Upload file to volume first (fast operation)
+    # Upload to volume (tracked as step 1)
+    from app.services.progress_tracker import start_step, complete_step as cs, fail_step
+    start_step(document_id, "upload_to_volume", f"Uploading {file.filename}")
     uc_path = upload_file_to_volume(file_bytes, file.filename, document_id)
     if not uc_path:
+        fail_step(document_id, "upload_to_volume", "Volume upload failed — check permissions")
         raise HTTPException(status_code=500, detail="Failed to upload file to Unity Catalog Volume")
+    cs(document_id, "upload_to_volume", f"Saved to {uc_path}")
 
-    # Insert pending record so client can track progress
+    # Insert pending record
     safe_name = file.filename.replace("'", "''")
     now = utc_now()
     execute_sql_no_result(f"""
@@ -92,7 +110,7 @@ async def upload_document(file: UploadFile = File(...)):
                 '{now}', 'processing', '{now}')
     """)
 
-    # Process in background thread
+    # Process remaining steps in background
     thread = threading.Thread(
         target=_process_in_background,
         args=(file_bytes, file.filename, document_id),
@@ -104,5 +122,4 @@ async def upload_document(file: UploadFile = File(...)):
         "document_id": document_id,
         "original_file_name": file.filename,
         "status": "processing",
-        "message": "Document uploaded successfully. Processing in background — check Documents page for status.",
     }

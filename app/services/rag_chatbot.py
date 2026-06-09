@@ -74,8 +74,8 @@ def _handle_comparison_chat(
     intent: dict[str, Any],
     history: Optional[list[dict]],
 ) -> dict[str, Any]:
-    """Handle comparison via direct SQL retrieval from both docs + single LLM call."""
-    from app.config import TABLE_DOCUMENT_CHUNKS, TABLE_DOCUMENT_SECTIONS
+    """Handle comparison via single SQL query + single LLM call — optimized for speed."""
+    from app.config import TABLE_DOCUMENT_SECTIONS
 
     doc_ids = _resolve_documents_for_comparison(intent)
 
@@ -86,7 +86,7 @@ def _handle_comparison_chat(
             "chunks_used": 0,
         }
 
-    # Get document metadata
+    # Single query: get docs + sections together
     id_list = ", ".join(f"'{d}'" for d in doc_ids)
     docs = execute_sql(f"""
         SELECT document_id, original_file_name, spec_number, issue_year, status
@@ -94,47 +94,45 @@ def _handle_comparison_chat(
         ORDER BY issue_year
     """)
 
-    # Get key sections from EACH document (first N sections give good overview)
-    all_chunks = []
-    for doc in docs:
-        doc_id = doc["document_id"]
-        # Get representative sections directly via SQL
-        sections = execute_sql(f"""
-            SELECT section_title, section_text, start_page, section_number
-            FROM {TABLE_DOCUMENT_SECTIONS}
-            WHERE document_id = '{doc_id}'
-            ORDER BY section_number
-            LIMIT 8
-        """)
-        for s in sections:
-            all_chunks.append({
-                "chunk_text": (s.get("section_text") or "")[:2000],
-                "section_title": s.get("section_title", ""),
-                "page_number": s.get("start_page"),
-                "section_number": s.get("section_number"),
-                "document_id": doc_id,
-                "doc_meta": doc,
-            })
+    # Single query for ALL sections from ALL docs (much faster than per-doc queries)
+    sections = execute_sql(f"""
+        SELECT document_id, section_title, SUBSTRING(section_text, 1, 2000) as section_text,
+               start_page, section_number
+        FROM {TABLE_DOCUMENT_SECTIONS}
+        WHERE document_id IN ({id_list})
+        ORDER BY document_id, section_number
+        LIMIT 30
+    """)
 
-    if not all_chunks:
+    if not sections:
         return {
             "answer": "Could not retrieve document content for comparison. Documents may still be processing.",
             "citations": [],
             "chunks_used": 0,
         }
 
+    doc_map = {d["document_id"]: d for d in docs}
+    all_chunks = []
+    for s in sections:
+        all_chunks.append({
+            "chunk_text": s.get("section_text") or "",
+            "section_title": s.get("section_title", ""),
+            "page_number": s.get("start_page"),
+            "section_number": s.get("section_number"),
+            "document_id": s["document_id"],
+            "doc_meta": doc_map.get(s["document_id"], {}),
+        })
+
     context = _format_context(all_chunks)
 
-    compare_system = """You are an expert engineering specification analyst. The user wants to COMPARE different versions of a specification document.
+    compare_system = """You are an expert engineering specification analyst comparing document versions.
 
 INSTRUCTIONS:
-- Compare the content from different document versions provided in the context.
-- Highlight KEY DIFFERENCES: additions, removals, modifications between versions.
+- Identify KEY DIFFERENCES between versions: additions, removals, modifications.
 - Organize by topic/section.
-- Cite sources: [Document | Year | Page | Section]
-- Be specific about what changed — quote exact requirement differences.
+- Cite: [Document | Year | Page | Section].
+- Be specific — quote exact requirement changes.
 - Note significance for engineering/quality teams.
-- If context doesn't cover a specific area, say so and suggest the user ask about that topic.
 - Be concise but thorough."""
 
     doc_list = ", ".join(f"{d.get('original_file_name')} ({d.get('issue_year')})" for d in docs)
@@ -144,7 +142,7 @@ INSTRUCTIONS:
 
     messages.append({
         "role": "user",
-        "content": f"DOCUMENTS BEING COMPARED: {doc_list}\n\nRETRIEVED CONTEXT:\n{context}\n\nUSER QUESTION:\n{question}\n\nProvide a clear comparison highlighting key differences between versions.",
+        "content": f"DOCUMENTS: {doc_list}\n\nCONTEXT:\n{context}\n\nQUESTION: {question}\n\nCompare and highlight key differences.",
     })
 
     answer = call_llm_chat(messages)

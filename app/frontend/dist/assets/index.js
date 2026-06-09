@@ -124,14 +124,71 @@ function DocumentLibrary({ documents, onRefresh, loading }) {
 }
 
 // ============================================================
-// UPLOAD PAGE
+// PIPELINE STEP COMPONENT
+// ============================================================
+function PipelineStepRow({ step, index }) {
+  const statusIcon = {
+    pending: <div className="w-5 h-5 rounded-full border border-white/20" />,
+    running: <div className="w-5 h-5 rounded-full border-2 border-element-cyan/30 border-t-element-cyan spinner" />,
+    completed: <div className="w-5 h-5 rounded-full bg-emerald-500/20 border border-emerald-500/50 flex items-center justify-center"><svg className="w-3 h-3 text-emerald-400" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7"/></svg></div>,
+    failed: <div className="w-5 h-5 rounded-full bg-red-500/20 border border-red-500/50 flex items-center justify-center"><svg className="w-3 h-3 text-red-400" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12"/></svg></div>,
+  };
+  const barColor = { pending: "bg-white/5", running: "bg-element-cyan/20", completed: "bg-emerald-500/10", failed: "bg-red-500/10" };
+
+  return (
+    <div className={`flex items-start gap-3 px-4 py-3 rounded-lg ${barColor[step.status] || "bg-white/5"} transition-all duration-300`}>
+      <div className="flex-shrink-0 mt-0.5">{statusIcon[step.status]}</div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center justify-between">
+          <span className={`text-xs font-semibold ${step.status === "running" ? "text-element-cyan" : step.status === "completed" ? "text-emerald-300" : step.status === "failed" ? "text-red-300" : "text-white/40"}`}>
+            {step.label}
+          </span>
+          {step.duration_ms != null && (
+            <span className="text-[9px] text-white/30 font-mono ml-2">{(step.duration_ms / 1000).toFixed(1)}s</span>
+          )}
+        </div>
+        {step.detail && (
+          <p className={`text-[10px] mt-0.5 font-mono ${step.status === "failed" ? "text-red-300/70" : "text-white/30"}`}>{step.detail}</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// UPLOAD PAGE WITH LIVE PIPELINE PROGRESS
 // ============================================================
 function UploadPage({ onUploadComplete }) {
   const [isDragging, setIsDragging] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [uploadResult, setUploadResult] = useState(null);
+  const [processing, setProcessing] = useState(false);
+  const [documentId, setDocumentId] = useState(null);
+  const [progress, setProgress] = useState(null);
   const [error, setError] = useState(null);
+  const [done, setDone] = useState(false);
   const fileInputRef = useRef(null);
+  const pollRef = useRef(null);
+
+  const stopPolling = () => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  };
+
+  const startPolling = (docId) => {
+    stopPolling();
+    pollRef.current = setInterval(async () => {
+      try {
+        const r = await get(`/api/documents/${docId}/progress`);
+        setProgress(r);
+        if (r.status === "completed" || r.status === "failed") {
+          stopPolling();
+          setProcessing(false);
+          setDone(true);
+          if (r.status === "completed" && onUploadComplete) onUploadComplete();
+        }
+      } catch (e) {}
+    }, 1500);
+  };
+
+  useEffect(() => { return () => stopPolling(); }, []);
 
   const handleDrop = useCallback(async (e) => {
     e.preventDefault();
@@ -146,73 +203,106 @@ function UploadPage({ onUploadComplete }) {
   };
 
   const processFile = async (file) => {
-    setUploading(true);
+    setProcessing(true);
     setError(null);
-    setUploadResult(null);
+    setProgress(null);
+    setDone(false);
+    setDocumentId(null);
     try {
       const result = await uploadFile("/api/documents/upload", file);
-      setUploadResult({...result, message: result.message || "Document uploaded and processing. Check Documents page for status."});
-      if (onUploadComplete) onUploadComplete();
+      setDocumentId(result.document_id);
+      startPolling(result.document_id);
     } catch (err) {
       setError(err.message);
+      setProcessing(false);
     }
-    setUploading(false);
+  };
+
+  const reset = () => {
+    setProcessing(false);
+    setDocumentId(null);
+    setProgress(null);
+    setError(null);
+    setDone(false);
   };
 
   return (
     <div className="h-full flex flex-col">
       <div className="px-6 py-4 border-b border-white/5">
         <h2 className="text-lg font-bold text-white">Upload Document</h2>
-        <p className="text-xs text-white/40 mt-0.5">Drag and drop PDF specifications for automated processing</p>
+        <p className="text-xs text-white/40 mt-0.5">Drag and drop PDF specifications — real-time pipeline progress below</p>
       </div>
-      <div className="flex-1 p-6 flex flex-col items-center justify-center">
-        <div
-          className={`drop-zone rounded-2xl p-12 text-center w-full max-w-xl cursor-pointer ${isDragging ? "active" : ""}`}
-          onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-          onDragLeave={() => setIsDragging(false)}
-          onDrop={handleDrop}
-          onClick={() => fileInputRef.current?.click()}
-        >
-          {uploading ? (
-            <div className="flex flex-col items-center gap-4">
-              <div className="w-12 h-12 border-2 border-element-cyan/30 border-t-element-cyan rounded-full spinner" />
-              <div className="text-sm text-white/60 font-medium">Processing document...</div>
-              <div className="text-[10px] text-white/30">Uploading → Parsing → Extracting metadata → Chunking → Embedding</div>
-            </div>
-          ) : (
-            <div className="flex flex-col items-center gap-3">
-              <div className="w-14 h-14 rounded-2xl glass flex items-center justify-center">
-                <IconUpload />
+      <div className="flex-1 p-6 overflow-y-auto">
+        {!processing && !done && (
+          <div className="flex flex-col items-center justify-center h-full">
+            <div
+              className={`drop-zone rounded-2xl p-12 text-center w-full max-w-xl cursor-pointer ${isDragging ? "active" : ""}`}
+              onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+              onDragLeave={() => setIsDragging(false)}
+              onDrop={handleDrop}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <div className="flex flex-col items-center gap-3">
+                <div className="w-14 h-14 rounded-2xl glass flex items-center justify-center">
+                  <IconUpload />
+                </div>
+                <div className="text-sm text-white/70 font-medium">Drop PDF here or click to browse</div>
+                <div className="text-[10px] text-white/30">Supports engineering specifications up to 100MB</div>
               </div>
-              <div className="text-sm text-white/70 font-medium">Drop PDF here or click to browse</div>
-              <div className="text-[10px] text-white/30">Supports engineering specifications up to 100MB</div>
+              <input ref={fileInputRef} type="file" accept=".pdf" className="hidden" onChange={handleFileSelect} />
             </div>
-          )}
-          <input ref={fileInputRef} type="file" accept=".pdf" className="hidden" onChange={handleFileSelect} />
-        </div>
-
-        {error && (
-          <div className="mt-6 w-full max-w-xl p-4 rounded-xl bg-red-500/10 border border-red-500/20 text-xs text-red-300 fade-up">
-            <strong>Error:</strong> {error}
+            {error && (
+              <div className="mt-6 w-full max-w-xl p-4 rounded-xl bg-red-500/10 border border-red-500/20 text-xs text-red-300 fade-up">
+                <strong>Error:</strong> {error}
+              </div>
+            )}
           </div>
         )}
 
-        {uploadResult && (
-          <div className="mt-6 w-full max-w-xl glass-card rounded-xl p-5 fade-up">
-            <div className="flex items-center gap-2 mb-3">
-              <div className="w-2 h-2 rounded-full bg-emerald-400" />
-              <span className="text-xs font-bold text-emerald-300">Document Processed Successfully</span>
+        {(processing || done) && progress && (
+          <div className="max-w-2xl mx-auto fade-up">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="text-sm font-bold text-white">Pipeline Execution</h3>
+                <p className="text-[10px] text-white/30 mt-0.5">Document ID: <span className="font-mono text-element-cyan">{documentId}</span></p>
+              </div>
+              <div className="text-right">
+                <div className={`text-xs font-bold ${progress.status === "completed" ? "text-emerald-400" : progress.status === "failed" ? "text-red-400" : "text-element-cyan"}`}>
+                  {progress.status === "completed" ? "COMPLETED" : progress.status === "failed" ? "FAILED" : "RUNNING"}
+                </div>
+                <div className="text-[10px] text-white/30">{progress.completed_steps}/{progress.total_steps} steps</div>
+              </div>
             </div>
-            <div className="grid grid-cols-2 gap-3 text-[11px]">
-              <div><span className="text-white/40">File:</span> <span className="text-white/80 font-mono">{uploadResult.original_file_name}</span></div>
-              <div><span className="text-white/40">Spec:</span> <span className="text-element-cyan font-mono">{uploadResult.spec_number || "—"}</span></div>
-              <div><span className="text-white/40">aeDMS:</span> <span className="text-white/80 font-mono">{uploadResult.aedms_number || "—"}</span></div>
-              <div><span className="text-white/40">Year:</span> <span className="text-white/80">{uploadResult.issue_year || "—"}</span></div>
-              <div><span className="text-white/40">Status:</span> <StatusBadge status={uploadResult.status || "unknown"} /></div>
-              <div><span className="text-white/40">Pages:</span> <span className="text-white/80">{uploadResult.page_count}</span></div>
-              <div><span className="text-white/40">Sections:</span> <span className="text-white/80">{uploadResult.sections_count}</span></div>
-              <div><span className="text-white/40">Chunks:</span> <span className="text-white/80">{uploadResult.chunks_count}</span></div>
+
+            {/* Progress bar */}
+            <div className="w-full h-2 rounded-full bg-white/5 mb-5 overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all duration-500 ${progress.status === "completed" ? "bg-emerald-500" : progress.status === "failed" ? "bg-red-500" : "bg-element-cyan"}`}
+                style={{ width: `${progress.percent}%` }}
+              />
             </div>
+
+            {/* Steps */}
+            <div className="space-y-2">
+              {progress.steps.map((step, i) => (
+                <PipelineStepRow key={step.step_name} step={step} index={i} />
+              ))}
+            </div>
+
+            {done && (
+              <div className="mt-6 flex justify-center">
+                <button onClick={reset} className="px-6 py-2 rounded-lg text-xs font-semibold bg-element-blue/20 text-element-cyan border border-element-blue/30 hover:bg-element-blue/30 transition-all">
+                  Upload Another Document
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {processing && !progress && (
+          <div className="flex flex-col items-center justify-center h-full">
+            <div className="w-12 h-12 border-2 border-element-cyan/30 border-t-element-cyan rounded-full spinner" />
+            <p className="text-sm text-white/50 mt-4">Starting pipeline...</p>
           </div>
         )}
       </div>
