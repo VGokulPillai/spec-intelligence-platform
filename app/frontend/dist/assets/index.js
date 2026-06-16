@@ -451,6 +451,7 @@ function ComparePage({ documents }) {
   const [selectedDocs, setSelectedDocs] = useState([]);
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [downloading, setDownloading] = useState(false);
 
   const toggleDoc = (docId) => {
     setSelectedDocs(prev => prev.includes(docId) ? prev.filter(d => d !== docId) : [...prev, docId]);
@@ -467,6 +468,31 @@ function ComparePage({ documents }) {
       setResults({ error: err.message });
     }
     setLoading(false);
+  };
+
+  const downloadDocx = async () => {
+    if (!results || !results.conclusion) return;
+    setDownloading(true);
+    try {
+      const r = await fetch(`${API}/api/compare/download-docx`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ document_ids: selectedDocs, conclusion: results.conclusion }),
+      });
+      if (!r.ok) throw new Error("Download failed");
+      const blob = await r.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = r.headers.get("Content-Disposition")?.split("filename=")[1]?.replace(/"/g, "") || "Comparison_Report.docx";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      alert("Failed to download report: " + err.message);
+    }
+    setDownloading(false);
   };
 
   const changeTypeColors = {
@@ -520,6 +546,20 @@ function ComparePage({ documents }) {
 
         {results && !results.error && (
           <div className="space-y-6">
+            {/* Download DOCX button */}
+            {results.conclusion && (
+              <div className="flex justify-end fade-up">
+                <button onClick={downloadDocx} disabled={downloading} className="px-5 py-2.5 rounded-lg text-xs font-semibold bg-gradient-to-r from-emerald-600 to-emerald-700 text-white hover:from-emerald-500 hover:to-emerald-600 shadow-lg transition-all disabled:opacity-50 flex items-center gap-2">
+                  {downloading ? (
+                    <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full spinner" />
+                  ) : (
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" /></svg>
+                  )}
+                  {downloading ? "Generating..." : "Download Report (.docx)"}
+                </button>
+              </div>
+            )}
+
             {/* Conclusion */}
             {results.conclusion && (
               <div className="glass-card rounded-xl p-5 border-l-4 border-element-blue fade-up">
