@@ -41,9 +41,14 @@ def call_llm(
     json_mode: bool = False,
 ) -> str:
     """Call LLM endpoint and return text response."""
-    host = DATABRICKS_HOST.rstrip("/")
+    host = DATABRICKS_HOST.rstrip("/") if DATABRICKS_HOST else ""
     if not host:
-        return ""
+        try:
+            from databricks.sdk import WorkspaceClient
+            w = WorkspaceClient()
+            host = w.config.host.rstrip("/")
+        except Exception:
+            return ""
 
     url = f"{host}/serving-endpoints/{LLM_ENDPOINT}/invocations"
     token = _get_token()
@@ -99,9 +104,14 @@ def call_llm_json(system_prompt: str, user_prompt: str, **kwargs) -> dict[str, A
 
 def call_llm_chat(messages: list[dict[str, str]], temperature: Optional[float] = None) -> str:
     """Call LLM with full message history."""
-    host = DATABRICKS_HOST.rstrip("/")
+    host = DATABRICKS_HOST.rstrip("/") if DATABRICKS_HOST else ""
     if not host:
-        return ""
+        try:
+            from databricks.sdk import WorkspaceClient
+            w = WorkspaceClient()
+            host = w.config.host.rstrip("/")
+        except Exception:
+            return ""
 
     url = f"{host}/serving-endpoints/{LLM_ENDPOINT}/invocations"
     token = _get_token()

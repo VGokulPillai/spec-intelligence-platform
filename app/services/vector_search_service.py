@@ -37,4 +37,8 @@ def search_chunks(
     ORDER BY s.section_number
     LIMIT {num_results}
     """
-    return execute_sql(sql)
+    try:
+        return execute_sql(sql)
+    except Exception as e:
+        logger.warning("Search query failed (table may not exist yet): %s", e)
+        return []

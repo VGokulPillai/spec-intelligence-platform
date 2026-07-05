@@ -7,27 +7,29 @@ command:
   - "8000"
 env:
   - name: DATABRICKS_HOST
-    value: https://fevm-serverless-stable-0esuib.cloud.databricks.com
+    value: https://fevm-serverless-stable-1acr1x.cloud.databricks.com
   - name: DATABRICKS_WAREHOUSE_ID
-    value: "015f965b7e3560dc"
+    value: "4484f27c707c5a31"
   - name: SPEC_CATALOG
-    value: serverless_stable_0esuib_catalog
+    value: serverless_stable_1acr1x_catalog
   - name: SPEC_SCHEMA
     value: spec_docs
   - name: LLM_ENDPOINT
     value: databricks-meta-llama-3-3-70b-instruct
   - name: EMBEDDING_ENDPOINT
     value: databricks-bge-large-en
-  - name: ENABLE_VECTOR_SEARCH
-    value: "true"
 resources:
   - name: sql-warehouse
     sql_warehouse:
-      id: "015f965b7e3560dc"
+      id: "4484f27c707c5a31"
       permission: CAN_USE
   - name: model-serving
     serving_endpoint:
       name: "databricks-meta-llama-3-3-70b-instruct"
+      permission: CAN_QUERY
+  - name: diff-model
+    serving_endpoint:
+      name: "databricks-claude-opus-4-8"
       permission: CAN_QUERY
   - name: embedding-serving
     serving_endpoint:

@@ -93,7 +93,12 @@ async def upload_document(file: UploadFile = File(...)):
     # Upload to volume (tracked as step 1)
     from app.services.progress_tracker import start_step, complete_step as cs, fail_step
     start_step(document_id, "upload_to_volume", f"Uploading {file.filename}")
-    uc_path = upload_file_to_volume(file_bytes, file.filename, document_id)
+    try:
+        uc_path = upload_file_to_volume(file_bytes, file.filename, document_id)
+    except Exception as e:
+        logger.error("Volume upload exception: %s", e)
+        fail_step(document_id, "upload_to_volume", f"Exception: {e}")
+        raise HTTPException(status_code=500, detail=f"Volume upload exception: {str(e)[:300]}")
     if not uc_path:
         fail_step(document_id, "upload_to_volume", "Volume upload failed — check permissions")
         raise HTTPException(status_code=500, detail="Failed to upload file to Unity Catalog Volume")

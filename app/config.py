@@ -16,7 +16,7 @@ DATABRICKS_HOST = os.environ.get("DATABRICKS_HOST", "")
 WAREHOUSE_ID = os.environ.get("DATABRICKS_WAREHOUSE_ID", "")
 
 # --- Unity Catalog Hierarchy ---
-CATALOG = os.environ.get("SPEC_CATALOG", "serverless_stable_0esuib_catalog")
+CATALOG = os.environ.get("SPEC_CATALOG", "serverless_stable_1acr1x_catalog")
 SCHEMA = os.environ.get("SPEC_SCHEMA", "spec_docs")
 
 # --- Unity Catalog Volume for raw PDFs ---

@@ -28,6 +28,7 @@ from app.routes.compare import router as compare_router
 from app.routes.documents import router as documents_router
 from app.routes.health import router as health_router
 from app.routes.setup import router as setup_router
+from app.routes.viewer import router as viewer_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,6 +55,7 @@ app.include_router(documents_router)
 app.include_router(chat_router)
 app.include_router(compare_router)
 app.include_router(setup_router)
+app.include_router(viewer_router)
 
 
 @app.on_event("startup")

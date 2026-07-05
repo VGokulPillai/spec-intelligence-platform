@@ -10,9 +10,81 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+import logging
+import requests
+
 from app.config import TABLE_DOCUMENTS, TABLE_DOCUMENT_SECTIONS
-from app.services.llm_service import call_llm_chat
+from app.services.llm_service import call_llm_chat, _get_token
 from app.services.uc_repository import execute_sql
+
+logger = logging.getLogger(__name__)
+
+DIFF_MODEL = "databricks-claude-opus-4-8"
+
+_page_text_cache: dict[str, dict[int, str]] = {}
+
+
+def _get_page_text(document_id: str, page_number: int) -> str:
+    """Get the full text of a specific page directly from the PDF."""
+    from app.services.uc_repository import download_file_from_volume
+
+    if document_id in _page_text_cache and page_number in _page_text_cache[document_id]:
+        return _page_text_cache[document_id][page_number]
+
+    doc_rows = execute_sql(
+        f"SELECT uc_volume_path FROM {TABLE_DOCUMENTS} WHERE document_id = '{document_id}'"
+    )
+    if not doc_rows:
+        return ""
+
+    uc_path = doc_rows[0].get("uc_volume_path", "")
+    file_bytes = download_file_from_volume(uc_path)
+    if not file_bytes:
+        return ""
+
+    try:
+        import fitz
+        pdf = fitz.open(stream=file_bytes, filetype="pdf")
+        if document_id not in _page_text_cache:
+            _page_text_cache[document_id] = {}
+        for i in range(len(pdf)):
+            text = pdf[i].get_text("text").strip()
+            _page_text_cache[document_id][i + 1] = text
+        pdf.close()
+        if len(_page_text_cache) > 10:
+            oldest = next(iter(_page_text_cache))
+            del _page_text_cache[oldest]
+        return _page_text_cache[document_id].get(page_number, "")
+    except Exception as e:
+        logger.error("Failed to extract page text: %s", e)
+        return ""
+
+
+def _call_diff_llm(messages: list[dict]) -> str:
+    """Call the expensive high-accuracy model for page diffs."""
+    from app.config import DATABRICKS_HOST
+    host = DATABRICKS_HOST.rstrip("/") if DATABRICKS_HOST else ""
+    if not host:
+        try:
+            from databricks.sdk import WorkspaceClient
+            host = WorkspaceClient().config.host.rstrip("/")
+        except Exception:
+            return ""
+
+    url = f"{host}/serving-endpoints/{DIFF_MODEL}/invocations"
+    token = _get_token()
+    try:
+        resp = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"messages": messages, "temperature": 0.0, "max_tokens": 1024},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        logger.warning("Diff LLM (%s) failed: %s — falling back to default", DIFF_MODEL, e)
+        return call_llm_chat(messages, temperature=0.0)
 
 router = APIRouter(prefix="/api/compare", tags=["compare"])
 
@@ -104,6 +176,73 @@ List the most significant 5-8 differences. Be specific — quote exact requireme
         "pairwise_comparisons": [],
         "documents": docs,
     }
+
+
+class PageDiffRequest(BaseModel):
+    doc_id_old: str
+    doc_id_new: str
+    page_number: int
+
+
+@router.post("/page-diff")
+async def get_page_diff(req: PageDiffRequest):
+    """Get a precise LLM summary of actual differences on this page between two docs.
+    
+    Uses the raw PDF page text (not section titles) to avoid text-block extraction artifacts.
+    """
+    from app.services.uc_repository import download_file_from_volume
+
+    old_page_text = _get_page_text(req.doc_id_old, req.page_number)
+    new_page_text = _get_page_text(req.doc_id_new, req.page_number)
+
+    if not old_page_text and not new_page_text:
+        return {"page": req.page_number, "summary": "No text found on this page.", "changes": []}
+
+    old_text = old_page_text or "(page not found)"
+    new_text = new_page_text or "(page not found)"
+
+    messages = [
+        {"role": "system", "content": """You are a precision document comparison tool. Your job is to find ONLY REAL differences between two versions of a specification page.
+
+ABSOLUTE RULES — VIOLATION MEANS FAILURE:
+1. NEVER report something as "changed" if the same text appears in both OLD and NEW versions.
+2. Formatting differences (line breaks, spacing, capitalization style) are NOT content changes — ignore them.
+3. If a title reads "METALLIC MATERIALS" in OLD and "METALLIC MATERIALS" in NEW — that is NOT a change. Do not report it.
+4. Only report a difference if the actual WORDS or NUMBERS are different between OLD and NEW.
+5. Dates, version numbers, added/removed bullet points, new paragraphs — these are real changes.
+6. If the two texts are essentially the same content, say so.
+
+OUTPUT FORMAT (follow exactly):
+SUMMARY: [One factual sentence about what genuinely differs, or "No meaningful changes on this page."]
+CHANGES:
+- [what specifically changed — quote the OLD vs NEW text] | [modified/added/removed]
+
+If no real differences exist:
+SUMMARY: No meaningful changes on this page.
+CHANGES:
+(none)"""},
+        {"role": "user", "content": f"Compare these two versions of page {req.page_number}. Find ONLY genuine content differences (not formatting).\n\n=== OLD VERSION ===\n{old_text}\n\n=== NEW VERSION ===\n{new_text}"},
+    ]
+
+    answer = _call_diff_llm(messages)
+    if not answer:
+        return {"page": req.page_number, "summary": "Could not analyze this page.", "changes": []}
+
+    lines = answer.strip().split("\n")
+    summary = ""
+    changes = []
+    for line in lines:
+        if line.startswith("SUMMARY:"):
+            summary = line[8:].strip()
+        elif line.startswith("- "):
+            change_text = line[2:].strip()
+            if change_text and change_text != "(none)":
+                changes.append(change_text)
+
+    if not summary:
+        summary = answer[:150]
+
+    return {"page": req.page_number, "summary": summary, "changes": changes}
 
 
 @router.post("/download-docx")
