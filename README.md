@@ -4,7 +4,14 @@ A Databricks-native document intelligence application for managing, searching, c
 
 Built with **FastAPI** (backend) + **React** (frontend), deployed as a **Databricks App** with data stored in **Unity Catalog**.
 
-![Comparison Demo](docs/comparison-demo.png)
+### Upload Pipeline
+![Upload Pipeline](docs/upload-pipeline.png)
+
+### Processing Complete
+![Processing Complete](docs/upload-done.png)
+
+### Split-Screen Document Comparison
+![Compare Split View](docs/compare-split.png)
 
 ---
 
