@@ -571,7 +571,7 @@ function ComparePage({ documents }) {
   async function downloadDocx() {
     if(!results||!results.conclusion)return; setDownloading(true);
     try {
-      var r = await fetch(API+"/api/compare/download-docx",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({document_ids:selectedDocs,conclusion:results.conclusion})});
+      var r = await fetch(API+"/api/compare/download-docx",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({document_ids:selectedDocs,conclusion:results.conclusion,include_page_diffs:true})});
       if(!r.ok)throw new Error("Failed"); var blob=await r.blob(); var url=window.URL.createObjectURL(blob); var a=document.createElement("a"); a.href=url; a.download="Comparison_Report.docx"; document.body.appendChild(a); a.click(); a.remove(); window.URL.revokeObjectURL(url);
     } catch(e){alert(e.message)} setDownloading(false);
   }
@@ -587,7 +587,7 @@ function ComparePage({ documents }) {
             <h2 style={{fontSize:"18px",fontWeight:"700",margin:0}}>Compare</h2>
           </div>
           <div style={{display:"flex",gap:"8px",alignItems:"center"}}>
-            {results&&results.conclusion&&<button onClick={downloadDocx} disabled={downloading} style={{padding:"7px 14px",borderRadius:"8px",fontSize:"10px",fontWeight:"600",background:"rgba(16,185,129,0.8)",color:"#fff",border:"none",cursor:"pointer"}}>{downloading?"...":"Download .docx"}</button>}
+            {results&&results.conclusion&&<button onClick={downloadDocx} disabled={downloading} style={{padding:"7px 14px",borderRadius:"8px",fontSize:"10px",fontWeight:"600",background:"rgba(16,185,129,0.8)",color:"#fff",border:"none",cursor:"pointer"}}>{downloading?"Generating full report...":"Download .docx"}</button>}
             <button onClick={runCompare} disabled={selectedDocs.length<2||loading} style={{padding:"7px 14px",borderRadius:"8px",fontSize:"10px",fontWeight:"600",background:"linear-gradient(135deg,#009DDC,#003B5C)",color:"#fff",border:"none",cursor:"pointer",opacity:(selectedDocs.length<2||loading)?0.3:1}}>{loading?"Analyzing...":"Compare ("+selectedDocs.length+")"}</button>
           </div>
         </div>

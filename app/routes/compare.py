@@ -99,6 +99,7 @@ class CompareRequest(BaseModel):
 class DocxRequest(BaseModel):
     document_ids: list[str]
     conclusion: str
+    include_page_diffs: bool = True
 
 
 @router.post("")
@@ -247,7 +248,7 @@ CHANGES:
 
 @router.post("/download-docx")
 async def download_comparison_docx(req: DocxRequest):
-    """Generate a branded DOCX report from comparison results."""
+    """Generate a branded DOCX report from comparison results including per-page diffs."""
     from docx import Document
     from docx.shared import Inches, Pt, Cm, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -255,7 +256,7 @@ async def download_comparison_docx(req: DocxRequest):
 
     id_list = ", ".join(f"'{d}'" for d in req.document_ids)
     docs = execute_sql(f"""
-        SELECT original_file_name, spec_number, issue_year, status
+        SELECT document_id, original_file_name, spec_number, issue_year, status, page_count
         FROM {TABLE_DOCUMENTS}
         WHERE document_id IN ({id_list})
         ORDER BY issue_year
@@ -263,14 +264,12 @@ async def download_comparison_docx(req: DocxRequest):
 
     doc = Document()
 
-    # Page margins
     for section in doc.sections:
         section.top_margin = Cm(2)
         section.bottom_margin = Cm(2)
         section.left_margin = Cm(2.5)
         section.right_margin = Cm(2.5)
 
-    # --- Header with Element logo ---
     header = doc.sections[0].header
     header_para = header.paragraphs[0]
     header_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
@@ -278,12 +277,10 @@ async def download_comparison_docx(req: DocxRequest):
         run = header_para.add_run()
         run.add_picture(_LOGO_PATH, width=Inches(1.8))
 
-    # Add "Confidential" to header right
     header_right = header_para.add_run("\tConfidential")
     header_right.font.size = Pt(8)
     header_right.font.color.rgb = RGBColor(0x99, 0x99, 0x99)
 
-    # --- Footer ---
     footer = doc.sections[0].footer
     footer_para = footer.paragraphs[0]
     footer_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -291,11 +288,9 @@ async def download_comparison_docx(req: DocxRequest):
     footer_run.font.size = Pt(8)
     footer_run.font.color.rgb = RGBColor(0x99, 0x99, 0x99)
 
-    # --- Title ---
     title = doc.add_heading("Specification Comparison Report", level=0)
     title.runs[0].font.color.rgb = RGBColor(0x00, 0x2B, 0x5C)
 
-    # --- Document info table ---
     doc.add_paragraph()
     table = doc.add_table(rows=1, cols=4)
     table.style = "Light Grid Accent 1"
@@ -314,8 +309,128 @@ async def download_comparison_docx(req: DocxRequest):
 
     doc.add_paragraph()
 
-    # --- Parse markdown conclusion into DOCX ---
+    # --- AI Analysis / Overall Conclusion ---
     _render_markdown_to_docx(doc, req.conclusion)
+
+    # --- Per-Page Section Differences ---
+    if req.include_page_diffs and len(req.document_ids) >= 2:
+        doc.add_page_break()
+        h = doc.add_heading("Page-by-Page Detailed Differences", level=1)
+        h.runs[0].font.color.rgb = RGBColor(0x00, 0x2B, 0x5C)
+
+        intro = doc.add_paragraph()
+        intro_run = intro.add_run(
+            "The following section provides a page-by-page comparison of every change between the OLD and NEW documents. "
+            "Each entry identifies exactly what was modified, added, or removed on that page."
+        )
+        intro_run.font.size = Pt(10)
+        intro_run.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
+        doc.add_paragraph()
+
+        old_doc_id = req.document_ids[0]
+        new_doc_id = req.document_ids[1]
+
+        old_doc_info = next((d for d in docs if d["document_id"] == old_doc_id), None)
+        new_doc_info = next((d for d in docs if d["document_id"] == new_doc_id), None)
+
+        max_pages = max(
+            int(old_doc_info.get("page_count", 0)) if old_doc_info else 0,
+            int(new_doc_info.get("page_count", 0)) if new_doc_info else 0,
+        )
+        max_pages = min(max_pages, 80)  # cap to avoid timeout
+
+        pages_with_changes = []
+        pages_no_changes = []
+
+        for page_num in range(1, max_pages + 1):
+            old_text = _get_page_text(old_doc_id, page_num)
+            new_text = _get_page_text(new_doc_id, page_num)
+
+            if not old_text and not new_text:
+                continue
+
+            if not old_text:
+                pages_with_changes.append({
+                    "page": page_num,
+                    "summary": f"Page {page_num} is newly added in the NEW version.",
+                    "changes": [f"Entire page added (not present in OLD document)"]
+                })
+                continue
+            if not new_text:
+                pages_with_changes.append({
+                    "page": page_num,
+                    "summary": f"Page {page_num} was removed in the NEW version.",
+                    "changes": [f"Entire page removed (not present in NEW document)"]
+                })
+                continue
+
+            if old_text.strip() == new_text.strip():
+                pages_no_changes.append(page_num)
+                continue
+
+            messages = [
+                {"role": "system", "content": """You are a precision document comparison tool. Find ONLY REAL content differences between two page versions.
+
+RULES:
+1. NEVER report formatting-only changes (spacing, line breaks, capitalization style).
+2. Only report genuine word/number/sentence changes.
+3. Quote the exact OLD text vs NEW text for each difference.
+4. Be comprehensive — list EVERY real difference on this page.
+
+OUTPUT FORMAT:
+SUMMARY: [One sentence describing what changed on this page]
+CHANGES:
+- "OLD text" vs "NEW text" | [modified/added/removed]"""},
+                {"role": "user", "content": f"Compare page {page_num}.\n\n=== OLD ===\n{old_text[:4000]}\n\n=== NEW ===\n{new_text[:4000]}"},
+            ]
+
+            answer = _call_diff_llm(messages)
+            if not answer:
+                continue
+
+            lines = answer.strip().split("\n")
+            summary = ""
+            changes = []
+            for line in lines:
+                if line.startswith("SUMMARY:"):
+                    summary = line[8:].strip()
+                elif line.startswith("- "):
+                    change_text = line[2:].strip()
+                    if change_text and change_text != "(none)":
+                        changes.append(change_text)
+
+            if summary and "no meaningful" not in summary.lower() and "no change" not in summary.lower():
+                pages_with_changes.append({"page": page_num, "summary": summary, "changes": changes})
+            else:
+                pages_no_changes.append(page_num)
+
+        # Write pages with changes
+        for entry in pages_with_changes:
+            page_heading = doc.add_heading(f"Page {entry['page']}", level=2)
+            page_heading.runs[0].font.color.rgb = RGBColor(0x00, 0x4D, 0x8C)
+
+            summary_para = doc.add_paragraph()
+            summary_run = summary_para.add_run(entry["summary"])
+            summary_run.font.size = Pt(10)
+            summary_run.bold = True
+
+            if entry.get("changes"):
+                for change in entry["changes"]:
+                    para = doc.add_paragraph(style="List Bullet")
+                    _add_bold_text(para, change)
+
+            doc.add_paragraph()
+
+        # Summary of unchanged pages
+        if pages_no_changes:
+            doc.add_paragraph()
+            unchanged_heading = doc.add_heading("Unchanged Pages", level=2)
+            unchanged_heading.runs[0].font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+            unchanged_para = doc.add_paragraph()
+            page_ranges = _format_page_ranges(pages_no_changes)
+            unch_run = unchanged_para.add_run(f"The following pages have no meaningful content changes: {page_ranges}")
+            unch_run.font.size = Pt(10)
+            unch_run.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
 
     # --- Disclaimer ---
     doc.add_paragraph()
@@ -328,7 +443,6 @@ async def download_comparison_docx(req: DocxRequest):
     disclaimer_run.font.italic = True
     disclaimer_run.font.color.rgb = RGBColor(0x99, 0x99, 0x99)
 
-    # Save to buffer
     buffer = io.BytesIO()
     doc.save(buffer)
     buffer.seek(0)
@@ -341,6 +455,25 @@ async def download_comparison_docx(req: DocxRequest):
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+def _format_page_ranges(pages: list[int]) -> str:
+    """Format a list of page numbers into compact ranges like '1-5, 8, 10-12'."""
+    if not pages:
+        return ""
+    pages = sorted(pages)
+    ranges = []
+    start = pages[0]
+    end = pages[0]
+    for p in pages[1:]:
+        if p == end + 1:
+            end = p
+        else:
+            ranges.append(f"{start}" if start == end else f"{start}-{end}")
+            start = p
+            end = p
+    ranges.append(f"{start}" if start == end else f"{start}-{end}")
+    return ", ".join(ranges)
 
 
 def _render_markdown_to_docx(doc, text: str):
