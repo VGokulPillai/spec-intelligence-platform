@@ -13,6 +13,9 @@ Built with **FastAPI** (backend) + **React** (frontend), deployed as a **Databri
 ### Split-Screen Document Comparison
 ![Compare Split View](docs/compare-split.png)
 
+### Per-Page AI Diff Analysis
+![Page Diff Panel](docs/page-diff-panel.png)
+
 ---
 
 ## What It Does
@@ -159,23 +162,27 @@ app/
 ├── routes/
 │   ├── documents.py             # Upload, list, detail endpoints
 │   ├── chat.py                  # RAG chatbot endpoint
-│   ├── compare.py               # Document comparison endpoint
+│   ├── compare.py               # Comparison + page-diff + DOCX download
+│   ├── viewer.py                # PDF viewer with bounding boxes
 │   ├── setup.py                 # Manual table setup endpoint
-│   └── health.py                # Health check
+│   └── health.py                # Health check + diagnostics
 ├── services/
 │   ├── document_pipeline.py     # End-to-end upload processing
 │   ├── pdf_parser.py            # PDF text extraction (PyMuPDF/pdfplumber)
+│   ├── deep_parser.py           # Multi-level section detection + bounding boxes
 │   ├── metadata_extractor.py    # LLM + regex metadata extraction
 │   ├── chunker.py               # Section detection + text chunking
-│   ├── llm_service.py           # LLM API wrapper
+│   ├── llm_service.py           # LLM API wrapper (Llama 3.3 + Claude Opus 4.8)
 │   ├── uc_repository.py         # Unity Catalog SQL operations
 │   ├── uc_setup.py              # Table creation DDL
 │   ├── comparison_service.py    # Document comparison logic
 │   ├── rag_chatbot.py           # RAG + comparison chat
 │   └── vector_search_service.py # Vector search (optional)
 └── frontend/
-    └── dist/                    # Pre-built React frontend
+    └── dist/
+        └── index.html           # Inlined React frontend (all components)
 databricks.yml                   # Databricks Asset Bundle config
+docs/                            # Screenshots for README
 ```
 
 ---
@@ -188,22 +195,57 @@ databricks.yml                   # Databricks Asset Bundle config
 | `GET` | `/api/documents` | List all documents |
 | `GET` | `/api/documents/{id}` | Get document details |
 | `GET` | `/api/documents/{id}/sections` | Get document sections |
+| `GET` | `/api/documents/{id}/progress` | Poll upload processing progress |
 | `POST` | `/api/chat` | RAG chatbot (Q&A + comparison) |
-| `POST` | `/api/compare` | Multi-document comparison |
+| `POST` | `/api/compare` | Multi-document overall comparison |
+| `POST` | `/api/compare/page-diff` | Per-page AI diff (Claude Opus 4.8) |
+| `POST` | `/api/compare/download-docx` | Download full comparison as branded DOCX |
+| `GET` | `/api/viewer/{id}` | Document metadata + section tree |
+| `GET` | `/api/viewer/{id}/page/{n}` | Page image + bounding box data |
 | `POST` | `/api/setup` | Manually trigger table setup |
 | `GET` | `/api/health` | Health check |
+| `GET` | `/api/health/diag` | Diagnostics (SDK, SQL, Volume connectivity) |
 
 ---
 
-## How Comparison Works
+## How Document Comparison Works
 
-When a user asks "What changed between 2020 and 2026?":
+The Compare page (`/compare`) provides a full side-by-side document analysis:
 
-1. **Intent Detection** — Regex detects comparison keywords + extracts years/spec numbers
-2. **Document Resolution** — Finds matching documents in the database (falls back to all docs)
-3. **Section Retrieval** — Pulls key sections from each document version via SQL
-4. **LLM Comparison** — Single LLM call compares sections and highlights differences
-5. **Response** — Formatted answer with citations in ~30 seconds
+### Three-Panel Split Screen
+
+| Panel | Description |
+|-------|-------------|
+| **LEFT — OLD Document** | Renders each page of the older version as an image with bounding boxes around detected sections |
+| **CENTER — Page Diff** | AI-generated per-page summary showing exactly what changed, what was added, and what was removed |
+| **RIGHT — NEW Document** | Renders each page of the newer version with the same bounding box overlays |
+
+### How It Works
+
+1. **Select Documents** — Pick 2+ documents from the library
+2. **AI Analysis** — Llama 3.3 70B generates an overall conclusion with key differences (risk levels, change types)
+3. **Side-by-Side View** — Navigate page by page with synced scrolling
+4. **Per-Page Diff** — Claude Opus 4.8 compares raw page text and reports only real content changes (ignores formatting noise)
+5. **Download DOCX** — Full report with overall conclusion + every page-by-page difference exported as a branded .docx
+
+### Where the Code Lives
+
+| Component | File | Description |
+|-----------|------|-------------|
+| Compare API | `app/routes/compare.py` | Overall comparison, per-page diff, and DOCX generation endpoints |
+| Page Diff LLM | `app/routes/compare.py` → `_call_diff_llm()` | Uses Claude Opus 4.8 for high-accuracy page diffs |
+| Raw Page Text | `app/routes/compare.py` → `_get_page_text()` | Extracts full page text from PDF via PyMuPDF |
+| Viewer API | `app/routes/viewer.py` | Serves page images + bounding box coordinates |
+| Deep Parser | `app/services/deep_parser.py` | Multi-level section/subsection detection with positional data |
+| Frontend UI | `app/frontend/dist/index.html` | `ComparePage`, `CompareDocPanel`, `PageDiffPanel` components |
+
+### Chat-Based Comparison
+
+In the Chat tab, users can also ask comparison questions in natural language:
+- "What changed between 2020 and 2026?"
+- "Compare thermocouple requirements across versions"
+
+The chat uses intent detection → document resolution → section retrieval → single LLM call.
 
 ---
 
